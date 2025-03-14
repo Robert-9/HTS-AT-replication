@@ -31,9 +31,11 @@ from data_generator import SEDDataset, DESED_Dataset, ESC_Dataset, SCV2_Dataset
 
 from model.htsat import HTSAT_Swin_Transformer
 import pytorch_lightning as pl
+from pytorch_lightning import seed_everything
 from pytorch_lightning.callbacks import ModelCheckpoint
 import warnings
-
+from pytorch_lightning.tuner.tuning import Tuner
+from pytorch_lightning.strategies import SingleDeviceStrategy
 
 
 warnings.filterwarnings("ignore")
@@ -208,19 +210,52 @@ def test():
         # import dataset SEDDataset
         
     audioset_data = data_prep(eval_dataset, eval_dataset, device_num)
+
+
+    # 给学习率自动搜索用的
+    sed_model = HTSAT_Swin_Transformer(spec_size=config.htsat_spec_size, patch_size=config.htsat_patch_size, in_chans=1, num_classes=config.classes_num, window_size=config.htsat_window_size,
+                                       config = config, depths = config.htsat_depth, embed_dim = config.htsat_dim, patch_stride=config.htsat_stride, num_heads=config.htsat_num_head)
+    model = SEDWrapper( sed_model = sed_model, config = config, dataset = eval_dataset)
+
     trainer = pl.Trainer(
         deterministic=True,
-        gpus = device_num, 
-        max_epochs = config.max_epoch,
-        auto_lr_find = True,    
-        sync_batchnorm = True,
-        checkpoint_callback = False,
-        accelerator = "ddp" if device_num > 1 else None,
-        num_sanity_val_steps = 0,
-        # resume_from_checkpoint = config.resume_checkpoint,
-        replace_sampler_ddp = False,
+        devices=device_num,                 # ✅新版用devices代替gpus
+        accelerator="gpu",                  # ✅明确指定accelerator
+        strategy=SingleDeviceStrategy(device="cuda:0") if device_num == 1 else "ddp",  # ✅ 明确指定分布式策略
+        max_epochs=config.max_epoch,
+        # auto_lr_find=True,
+        sync_batchnorm=True,
+        callbacks=[],                       # ✅ checkpoint_callback已废弃，用空callbacks替代即可
+        num_sanity_val_steps=0,
         gradient_clip_val=1.0
+        # deterministic=True,
+        # gpus = device_num,
+        # max_epochs = config.max_epoch,
+        # auto_lr_find = True,
+        # sync_batchnorm = True,
+        # checkpoint_callback = False,
+        # accelerator = "ddp" if device_num > 1 else None,
+        # num_sanity_val_steps = 0,
+        # # resume_from_checkpoint = config.resume_checkpoint,
+        # replace_sampler_ddp = False,
+        # gradient_clip_val=1.0
     )
+    print(f"Trainer 设备类型: {trainer.device_type}")
+
+    # 补充的 pl2.x 版本下的学习率搜索
+    tuner = Tuner(trainer)
+    lr_finder = tuner.lr_find(  # 执行学习率搜索
+        model,
+        min_lr=1e-5,  # 最小学习率
+        max_lr=1e-2,  # 最大学习率
+        num_training=100,  # 训练步数
+        mode="exponential"  # 搜索模式（"linear" 或 "exponential"）
+    )
+    # 获取最佳学习率
+    suggested_lr = lr_finder.suggestion()  # 推荐值
+    print(f"Suggested LR: {suggested_lr}")
+    config.learning_rate = suggested_lr
+
     sed_model = HTSAT_Swin_Transformer(
         spec_size=config.htsat_spec_size,
         patch_size=config.htsat_patch_size,
@@ -233,7 +268,6 @@ def test():
         patch_stride=config.htsat_stride,
         num_heads=config.htsat_num_head
     )
-    
     model = SEDWrapper(
         sed_model = sed_model, 
         config = config,
@@ -253,27 +287,27 @@ def train():
     print("each batch size:", config.batch_size // device_num)
     
     # dataset file pathes
-    if config.dataset_type == "audioset":
+    if config.dataset_type == "audioset":  # _index_path存放音频数据的索引文件，_idc文件存储对应的样本索引或划分
         train_index_path = os.path.join(config.dataset_path, "hdf5s","indexes", config.index_type + ".h5")
         eval_index_path = os.path.join(config.dataset_path,"hdf5s", "indexes", "eval.h5")
         train_idc = np.load(config.index_type + "_idc.npy", allow_pickle = True)
         eval_idc = np.load("eval_idc.npy", allow_pickle = True)
-    elif config.dataset_type == "esc-50":
+    elif config.dataset_type == "esc-50":  # 数据集较小，所以整体加载并根据训练或验证后续进行切分
         full_dataset = np.load(os.path.join(config.dataset_path, "esc-50-data.npy"), allow_pickle = True)
     elif config.dataset_type == "scv2":
         train_set = np.load(os.path.join(config.dataset_path, "scv2_train.npy"), allow_pickle = True)
         test_set = np.load(os.path.join(config.dataset_path, "scv2_test.npy"), allow_pickle = True)
    
-    # set exp folder
-    exp_dir = os.path.join(config.workspace, "results", config.exp_name)
-    checkpoint_dir = os.path.join(config.workspace, "results", config.exp_name, "checkpoint")
+    # set exp folder  实验结果的保存路径和checkpoint路径
+    exp_dir = os.path.join(config.workspace, "outputs", config.exp_name, config.job_id)  # 增加了job_id  results->outputs
+    checkpoint_dir = os.path.join(config.workspace, "outputs", config.exp_name, config.job_id, "checkpoint")
     if not config.debug:
         create_folder(os.path.join(config.workspace, "results"))
         create_folder(exp_dir)
         create_folder(checkpoint_dir)
         dump_config(config, os.path.join(exp_dir, config.exp_name), False)
 
-    # import dataset SEDDataset
+    # import dataset 不同的数据集用不同的输入参数
     if config.dataset_type == "audioset":
         print("Using Audioset")
         dataset = SEDDataset(
@@ -312,7 +346,10 @@ def train():
             eval_mode = True
         )
 
+    # DataLoader封装
     audioset_data = data_prep(dataset, eval_dataset, device_num)
+
+    # 模型保存策略
     if config.dataset_type == "audioset":
         checkpoint_callback = ModelCheckpoint(
             monitor = "mAP",
@@ -327,21 +364,58 @@ def train():
             save_top_k = 20,
             mode = "max"
         )
+
+    # 给学习率自动搜索用的
+    sed_model = HTSAT_Swin_Transformer(spec_size=config.htsat_spec_size, patch_size=config.htsat_patch_size, in_chans=1, num_classes=config.classes_num, window_size=config.htsat_window_size,
+                                       config = config, depths = config.htsat_depth, embed_dim = config.htsat_dim, patch_stride=config.htsat_stride, num_heads=config.htsat_num_head)
+    model = SEDWrapper( sed_model = sed_model, config = config, dataset = dataset)
+
+    # 训练器 Trainer对象支持DDP多GPU训练
     trainer = pl.Trainer(
         deterministic=True,
-        default_root_dir = checkpoint_dir,
-        gpus = device_num, 
-        val_check_interval = 0.1,
-        max_epochs = config.max_epoch,
-        auto_lr_find = True,    
-        sync_batchnorm = True,
-        callbacks = [checkpoint_callback],
-        accelerator = "ddp" if device_num > 1 else None,
-        num_sanity_val_steps = 0,
-        resume_from_checkpoint = None, 
-        replace_sampler_ddp = False,
+        default_root_dir=checkpoint_dir,
+        devices=device_num,
+        val_check_interval=0.1,
+        max_epochs=config.max_epoch,
+        # auto_lr_find=True,
+        sync_batchnorm=True,
+        callbacks=[checkpoint_callback],
+        accelerator="gpu",
+        strategy=SingleDeviceStrategy(device="cuda:0") if device_num == 1 else "ddp",
+        num_sanity_val_steps=0,
         gradient_clip_val=1.0
+        # deterministic=True,
+        # default_root_dir = checkpoint_dir,
+        # gpus = device_num,
+        # val_check_interval = 0.1,
+        # max_epochs = config.max_epoch,
+        # auto_lr_find = True,
+        # sync_batchnorm = True,
+        # callbacks = [checkpoint_callback],
+        # accelerator = "ddp" if device_num > 1 else None,
+        # num_sanity_val_steps = 0,
+        # resume_from_checkpoint = None,
+        # replace_sampler_ddp = False,
+        # gradient_clip_val=1.0,
     )
+    print(f"Trainer 设备类型: {trainer.device_type}")
+
+    # 补充的 pl2.x 版本下的学习率搜索
+    tuner = Tuner(trainer)
+    lr_finder = tuner.lr_find(  # 执行学习率搜索
+        model,
+        min_lr=1e-5,  # 最小学习率
+        max_lr=1e-2,  # 最大学习率
+        num_training=100,  # 训练步数
+        mode="exponential"  # 搜索模式（"linear" 或 "exponential"）
+    )
+    # 获取最佳学习率
+    suggested_lr = lr_finder.suggestion()  # 推荐值
+    print(f"Suggested LR: {suggested_lr}")
+    config.learning_rate = suggested_lr
+
+
+    # 模型定义与实例化
     sed_model = HTSAT_Swin_Transformer(
         spec_size=config.htsat_spec_size,
         patch_size=config.htsat_patch_size,
@@ -354,12 +428,15 @@ def train():
         patch_stride=config.htsat_stride,
         num_heads=config.htsat_num_head
     )
-    
+    # 模型外层套一个wrapper  便于整合额外功能
     model = SEDWrapper(
         sed_model = sed_model, 
         config = config,
         dataset = dataset
     )
+    model = model.to("cuda")
+
+    # 模型权重加载（是否预训练）
     if config.resume_checkpoint is not None:
         ckpt = torch.load(config.resume_checkpoint, map_location="cpu")
         ckpt["state_dict"].pop("sed_model.head.weight")
@@ -368,7 +445,7 @@ def train():
         ckpt["state_dict"].pop("sed_model.tscam_conv.weight")
         ckpt["state_dict"].pop("sed_model.tscam_conv.bias")
         model.load_state_dict(ckpt["state_dict"], strict=False)
-    elif config.swin_pretrain_path is not None: # train with pretrained model
+    elif config.swin_pretrain_path is not None:  # train with pretrained model
         ckpt = torch.load(config.swin_pretrain_path, map_location="cpu")
         # load pretrain model
         ckpt = ckpt["model"]
@@ -394,6 +471,8 @@ def train():
         print("unfound parameters: ", unfound_parameters)
         model.load_state_dict(ckpt, strict = False)
         model_params = dict(model.named_parameters())
+
+    # 启动训练流程
     trainer.fit(model, audioset_data)
 
 
@@ -409,7 +488,8 @@ def main():
     args = parser.parse_args()
     # default settings
     logging.basicConfig(level=logging.INFO) 
-    pl.utilities.seed.seed_everything(seed = config.random_seed)
+    # pl.utilities.seed.seed_everything(seed = config.random_seed)
+    seed_everything(config.random_seed)
 
     if args.mode == "train":
         train()

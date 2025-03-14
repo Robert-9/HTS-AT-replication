@@ -85,9 +85,20 @@ def create_folder(fd):
 def dump_config(config, filename, include_time = False):
     save_time = datetime.now().strftime("%Y_%m_%d_%H_%M_%S")
     config_json = {}
+
+    # for key in dir(config):
+    #     if not key.startswith("_"):
+    #         config_json[key] = eval("config." + key)
+    # 安全地获取config的属性，确保只序列化基础数据类型
     for key in dir(config):
         if not key.startswith("_"):
-            config_json[key] = eval("config." + key)
+            value = getattr(config, key)
+            if isinstance(value, (int, float, str, bool, list, dict, type(None))):
+                config_json[key] = value
+            else:
+                # 不可序列化类型，跳过或记录提示
+                print(f"跳过无法序列化的属性: {key} ({type(value)})")
+
     if include_time:
         filename = filename + "_" + save_time
     with open(filename + ".json", "w") as f:      
