@@ -78,22 +78,37 @@ class SEDWrapper(pl.LightningModule):
         pred, _ = self(batch["waveform"], mix_lambda)
         loss = self.loss_func(pred, batch["target"])
         self.log("loss", loss, on_epoch= True, prog_bar=True)
+
+        # 保存输出到实例属性
+        if not hasattr(self, "train_step_outputs"):
+            self.train_step_outputs = []
+        self.train_step_outputs.append({"loss": loss})
+
         return loss
         
-    def training_epoch_end(self, outputs):
-        # Change: SWA, deprecated
-        # for opt in self.trainer.optimizers:
-        #     if not type(opt) is SWA:
-        #         continue
-        #     opt.swap_swa_sgd()
-        self.dataset.generate_queue()
+    # def training_epoch_end(self, outputs):
+    #     # Change: SWA, deprecated
+    #     # for opt in self.trainer.optimizers:
+    #     #     if not type(opt) is SWA:
+    #     #         continue
+    #     #     opt.swap_swa_sgd()
+    #     self.dataset.generate_queue()
+
+    # 适配 PyTorch Lightning 2.0+
+    def on_train_epoch_end(self):
+        # 从实例属性中获取缓存的输出
+        outputs = self.train_step_outputs  # 需在training_step中保存输出
+        avg_loss = torch.stack([x["loss"] for x in outputs]).mean()
+        self.log("train_loss", avg_loss)
+        # 清空缓存
+        self.train_step_outputs.clear()
 
 
     def validation_step(self, batch, batch_idx):
         pred, _ = self(batch["waveform"])
         return [pred.detach(), batch["target"].detach()]
     
-    def validation_epoch_end(self, validation_step_outputs):
+    def on_validation_epoch_end(self, validation_step_outputs):# def validation_epoch_end(self, validation_step_outputs):
         self.device_type = next(self.parameters()).device
         pred = torch.cat([d[0] for d in validation_step_outputs], dim = 0)
         target = torch.cat([d[1] for d in validation_step_outputs], dim = 0)
@@ -176,7 +191,7 @@ class SEDWrapper(pl.LightningModule):
         else:
             return [pred.detach(), batch["target"].detach()]
 
-    def test_epoch_end(self, test_step_outputs):
+    def on_test_epoch_end(self, test_step_outputs):
         self.device_type = next(self.parameters()).device
         if self.config.fl_local:
             pred = np.concatenate([d[0] for d in test_step_outputs], axis = 0)
