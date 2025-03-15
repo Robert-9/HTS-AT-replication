@@ -78,37 +78,22 @@ class SEDWrapper(pl.LightningModule):
         pred, _ = self(batch["waveform"], mix_lambda)
         loss = self.loss_func(pred, batch["target"])
         self.log("loss", loss, on_epoch= True, prog_bar=True)
-
-        # 保存输出到实例属性
-        if not hasattr(self, "train_step_outputs"):
-            self.train_step_outputs = []
-        self.train_step_outputs.append({"loss": loss})
-
         return loss
         
-    # def training_epoch_end(self, outputs):
-    #     # Change: SWA, deprecated
-    #     # for opt in self.trainer.optimizers:
-    #     #     if not type(opt) is SWA:
-    #     #         continue
-    #     #     opt.swap_swa_sgd()
-    #     self.dataset.generate_queue()
-
-    # 适配 PyTorch Lightning 2.0+
-    def on_train_epoch_end(self):
-        # 从实例属性中获取缓存的输出
-        outputs = self.train_step_outputs  # 需在training_step中保存输出
-        avg_loss = torch.stack([x["loss"] for x in outputs]).mean()
-        self.log("train_loss", avg_loss)
-        # 清空缓存
-        self.train_step_outputs.clear()
+    def training_epoch_end(self, outputs):
+        # Change: SWA, deprecated
+        # for opt in self.trainer.optimizers:
+        #     if not type(opt) is SWA:
+        #         continue
+        #     opt.swap_swa_sgd()
+        self.dataset.generate_queue()
 
 
     def validation_step(self, batch, batch_idx):
         pred, _ = self(batch["waveform"])
         return [pred.detach(), batch["target"].detach()]
     
-    def on_validation_epoch_end(self, validation_step_outputs):# def validation_epoch_end(self, validation_step_outputs):
+    def validation_epoch_end(self, validation_step_outputs):
         self.device_type = next(self.parameters()).device
         pred = torch.cat([d[0] for d in validation_step_outputs], dim = 0)
         target = torch.cat([d[1] for d in validation_step_outputs], dim = 0)
@@ -191,57 +176,54 @@ class SEDWrapper(pl.LightningModule):
         else:
             return [pred.detach(), batch["target"].detach()]
 
-    def on_test_epoch_end(self, test_step_outputs):
+    def test_epoch_end(self, test_step_outputs):
         self.device_type = next(self.parameters()).device
         if self.config.fl_local:
-            pred = np.concatenate([d[0] for d in test_step_outputs], axis = 0)
-            pred_map = np.concatenate([d[1] for d in test_step_outputs], axis = 0)
-            audio_name = np.concatenate([d[2] for d in test_step_outputs], axis = 0)
-            real_len = np.concatenate([d[3] for d in test_step_outputs], axis = 0)
-            heatmap_file = os.path.join(self.config.heatmap_dir, self.config.test_file + "_" + str(self.device_type) + ".npy")
+            # 原代码无需改动
+            pred = np.concatenate([d[0] for d in test_step_outputs], axis=0)
+            pred_map = np.concatenate([d[1] for d in test_step_outputs], axis=0)
+            audio_name = np.concatenate([d[2] for d in test_step_outputs], axis=0)
+            real_len = np.concatenate([d[3] for d in test_step_outputs], axis=0)
+            heatmap_file = os.path.join(self.config.heatmap_dir,
+                                        self.config.test_file + "_" + str(self.device_type) + ".npy")
             save_npy = [
                 {
                     "audio_name": audio_name[i],
                     "heatmap": pred_map[i],
                     "pred": pred[i],
-                    "real_len":real_len[i]
+                    "real_len": real_len[i]
                 }
                 for i in range(len(pred))
             ]
             np.save(heatmap_file, save_npy)
         else:
             self.device_type = next(self.parameters()).device
-            pred = torch.cat([d[0] for d in test_step_outputs], dim = 0)
-            target = torch.cat([d[1] for d in test_step_outputs], dim = 0)
-            gather_pred = [torch.zeros_like(pred) for _ in range(dist.get_world_size())]
-            gather_target = [torch.zeros_like(target) for _ in range(dist.get_world_size())]
-            dist.barrier()
-            if self.config.dataset_type == "audioset":
-                metric_dict = {
-                "mAP": 0.,
-                "mAUC": 0.,
-                "dprime": 0.
-                }
-            else:
-                metric_dict = {
-                    "acc":0.
-                }
-            dist.all_gather(gather_pred, pred)
-            dist.all_gather(gather_target, target)
-            if dist.get_rank() == 0:
-                gather_pred = torch.cat(gather_pred, dim = 0).cpu().numpy()
-                gather_target = torch.cat(gather_target, dim = 0).cpu().numpy()
+            pred = torch.cat([d[0] for d in test_step_outputs], dim=0)
+            target = torch.cat([d[1] for d in test_step_outputs], dim=0)
+
+            # 使用 Lightning 内置方法聚合数据
+            gather_pred = self.all_gather(pred)
+            gather_target = self.all_gather(target)
+
+            # 主进程判断（兼容单 GPU）
+            if self.trainer.global_rank == 0:  # 直接使用 Lightning 的 global_rank
+                gather_pred = gather_pred.cpu().numpy()
+                gather_target = gather_target.cpu().numpy()
                 if self.config.dataset_type == "scv2":
                     gather_target = np.argmax(gather_target, 1)
                 metric_dict = self.evaluate_metric(gather_pred, gather_target)
-                print(self.device_type, dist.get_world_size(), metric_dict, flush = True)
-            if self.config.dataset_type == "audioset":
-                self.log("mAP", metric_dict["mAP"] * float(dist.get_world_size()), on_epoch = True, prog_bar=True, sync_dist=True)
-                self.log("mAUC", metric_dict["mAUC"] * float(dist.get_world_size()), on_epoch = True, prog_bar=True, sync_dist=True)
-                self.log("dprime", metric_dict["dprime"] * float(dist.get_world_size()), on_epoch = True, prog_bar=True, sync_dist=True)
+                print(f"Metrics: {metric_dict}", flush=True)
             else:
-                self.log("acc", metric_dict["acc"] * float(dist.get_world_size()), on_epoch = True, prog_bar=True, sync_dist=True)
-            dist.barrier()
+                metric_dict = {"mAP": 0., "mAUC": 0., "dprime": 0.} if self.config.dataset_type == "audioset" else {
+                    "acc": 0.}
+
+            # 自动同步指标（无需手动乘 world_size）
+            if self.config.dataset_type == "audioset":
+                self.log("mAP", metric_dict["mAP"], on_epoch=True, prog_bar=True, sync_dist=True)
+                self.log("mAUC", metric_dict["mAUC"], on_epoch=True, prog_bar=True, sync_dist=True)
+                self.log("dprime", metric_dict["dprime"], on_epoch=True, prog_bar=True, sync_dist=True)
+            else:
+                self.log("acc", metric_dict["acc"], on_epoch=True, prog_bar=True, sync_dist=True)
     
 
     def configure_optimizers(self):
@@ -372,7 +354,7 @@ class Ensemble_SEDWrapper(pl.LightningModule):
             gather_pred = [torch.zeros_like(pred) for _ in range(dist.get_world_size())]
             gather_target = [torch.zeros_like(target) for _ in range(dist.get_world_size())]
 
-            dist.barrier()
+            # dist.barrier()
             if self.config.dataset_type == "audioset":
                 metric_dict = {
                 "mAP": 0.,
@@ -398,7 +380,7 @@ class Ensemble_SEDWrapper(pl.LightningModule):
                 self.log("dprime", metric_dict["dprime"] * float(dist.get_world_size()), on_epoch = True, prog_bar=True, sync_dist=True)
             else:
                 self.log("acc", metric_dict["acc"] * float(dist.get_world_size()), on_epoch = True, prog_bar=True, sync_dist=True)
-            dist.barrier()
+            # dist.barrier()
 
 
     
