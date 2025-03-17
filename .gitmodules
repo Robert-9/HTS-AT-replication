@@ -1,0 +1,3 @@
+[submodule "HTS-AT-recurrent"]
+	path = HTS-AT-recurrent
+	url = https://github.com/Robert-9/HTS-AT-recurrent.git
