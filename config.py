@@ -7,21 +7,26 @@ from datetime import datetime
 
 job_id = os.environ.get("SLURM_JOB_ID", datetime.now().strftime('%Y%m%d_%H%M%S'))
 
-exp_name = "htsat_esc_50"  # the saved ckpt prefix name of the model
+exp_name = "htsat_kmlab"  # the saved ckpt prefix name of the model  htsat_esc_50
+dataset_type = "kmlab"  # "audioset" "esc-50" "scv2" "kmlab"
 
-workspace = "/public/home/hpc234612204/article_codes/htsat"  # "/home/kechen/Research/HTSAT"  # 代码所在文件夹
-dataset_path = "/public/home/hpc234612204/DataSets/ESC_50"  # "/home/Research/audioset"  # 数据集路径
+number = ""
+# 数据集路径
+dataset_path = "/public/home/" + number + "/DataSets/kmust_lab_dataset/segmented"  # "/public/home/" + number + "/DataSets/ESC_50"  "/home/Research/audioset"
+
+
+workspace = "/public/home/" + number + "/article_codes/htsat"  # "/home/kechen/Research/HTSAT"  # 代码所在文件夹
 # desed_folder = "/home/Research/DESED" # the desed file 音频事件检测  不需要
 
-dataset_type = "esc-50"  # "audioset" "esc-50" "scv2"
+
 index_type = "full_train"  # only works for audioset
 balanced_data = True  # only works for audioset
 
-# AudioSet & SCV2: "clip_bce" |  ESC-50: "clip_ce"
+# AudioSet & SCV2: "clip_bce" |  ESC-50 & KmLab: "clip_ce"
 loss_type = "clip_ce"
 
-# trained from a checkpoint, or evaluate a single model 
-resume_checkpoint = None 
+# trained from a checkpoint, or evaluate a single model
+resume_checkpoint = None  # 测试时调用  需手动设置为指定路径下的权重文件  否则会加载新的权重 测试准确率会很低
 # "/home/Research/model_backup/AudioSet/HTSAT_AudioSet_Saved_1.ckpt"
 
 
@@ -47,8 +52,8 @@ lr_rate = [0.02, 0.05, 0.1]  # [0.1, 0.01, 0.001]
 # these data preparation optimizations do not bring many improvements, so deprecated
 enable_token_label = False # token label
 class_map_path = "class_hier_map.npy"
-class_filter = None 
-retrieval_index = [15382, 9202, 130, 17618, 17157, 17516, 16356, 6165, 13992, 9238, 5550, 5733, 1914, 1600, 3450, 13735, 11108, 3762, 
+class_filter = None
+retrieval_index = [15382, 9202, 130, 17618, 17157, 17516, 16356, 6165, 13992, 9238, 5550, 5733, 1914, 1600, 3450, 13735, 11108, 3762,
     9840, 11318, 8131, 4429, 16748, 4992, 16783, 12691, 4945, 8779, 2805, 9418, 2797, 14357, 5603, 212, 3852, 12666, 1338, 10269, 2388, 8260, 4293, 14454, 7677, 11253, 5060, 14938, 8840, 4542, 2627, 16336, 8992, 15496, 11140, 446, 6126, 10691, 8624, 10127, 9068, 16710, 10155, 14358, 7567, 5695, 2354, 8057, 17635, 133, 16183, 14535, 7248, 4560, 14429, 2463, 10773, 113, 2462, 9223, 4929, 14274, 4716, 17307, 4617, 2132, 11083, 1039, 1403, 9621, 13936, 2229, 2875, 17840, 9359, 13311, 9790, 13288, 4750, 17052, 8260, 14900]
 token_label_range = [0.2,0.6]
 enable_time_shift = False # shift time
@@ -57,7 +62,7 @@ enable_repeat_mode = False # repeat the spectrogram / reshape the spectrogram
 
 
 # for model's design
-enable_tscam = True  # enbale the token-semantic layer 对于音频事件检测（如Audioset）推荐True  若仅分类且不需要时间-频率定位信息，可以考虑False。
+enable_tscam = False  # enbale the token-semantic layer 对于音频事件检测（如Audioset）推荐True  若仅分类且不需要时间-频率定位信息，可以考虑False。
 
 # for signal processing
 sample_rate = 32000  # 16000 for scv2, 32000 for audioset and esc-50
